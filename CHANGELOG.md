@@ -1,3 +1,13 @@
+## v[1.14.1] - 2026-07-08
+
+### 🐛 Bug Fixes
+- **`users.json` could be silently wiped on a transient read error** — `UsersStore._load_file()` caught any read/parse failure (disk full, corruption, permission hiccup) and quietly reset the in-memory store to empty. Since every mutation loads then immediately re-saves, the very next login or admin edit would permanently persist that empty state, erasing every user. It now raises instead of swallowing the error, so callers fail loudly and the on-disk data is never overwritten. An empty/missing file is still treated as a legitimate fresh start.
+- **`_save_atomic()` cross-device fallback wasn't atomic** — the fallback path (used when `users.json` is a single-file bind mount) truncated the destination file before the copy was known to succeed. It now backs up the existing file first and restores it if the write fails partway, and fsyncs before the atomic rename.
+
+### 🧹 Chore
+- **Removed orphaned `blueprints/` refactor** — `blueprints/admin.py`, `blueprints/auth.py`, and `blueprints/door.py` duplicated routes already served inline by `app.py` but were never registered (`register_blueprint()` was never called), leaving ~1000 lines of dead, untested code that also broke the CI coverage gate.
+- **Removed a stray legacy `mqtt_test.py`** debug script that had been resurrected at the repo root; it depended on an uninstalled `paho` package and broke both `ruff` (pre-commit) and pytest collection (its `_test.py` suffix made pytest try to import it as a test module).
+
 ## v[1.14.0] - 2026-06-30
 
 ### 🔐 Security & Hardening
