@@ -197,6 +197,19 @@ def test_battery_exception_returns_none(client, monkeypatch):
         assert response.get_json()["level"] is None
 
 
+def test_battery_result_is_cached(client, monkeypatch):
+    # Two requests within the TTL should only hit Home Assistant once.
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"state": "87"}
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        first = client.get("/battery")
+        second = client.get("/battery")
+        assert first.get_json()["level"] == 87
+        assert second.get_json()["level"] == 87
+        assert mock_get.call_count == 1
+
+
 def test_auth_status_oidc_disabled_ignores_stale_session(client):
     # Explicitly disable OIDC to ensure gating is respected even with stale session keys
     import app as app_module
@@ -276,7 +289,7 @@ def test_battery_invalid_format(client, monkeypatch):
         assert response.get_json()["level"] is None
 
 
-def test_admin_logs_parsing(client, app_module, tmp_path):
+def test_admin_logs_parsing(client, app_module, tmp_path, monkeypatch):
     # Create a log line and ensure admin logs endpoint parses it
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -290,20 +303,18 @@ def test_admin_logs_parsing(client, app_module, tmp_path):
     }
     log_file.write_text(json.dumps(entry) + "\n", encoding="utf-8")
 
-    # Patch the path used inside app.admin_logs to point to our temp file
-    with (
-        patch("app.os.path.exists", return_value=True),
-        patch("app.os.path.join", return_value=str(log_file)),
-    ):
-        # Authenticate admin by flagging session
-        with client.session_transaction() as s:
-            s["admin_authenticated"] = True
-            s["admin_login_time"] = datetime.now(timezone.utc).isoformat()
-        r = client.get("/admin/logs")
-        assert r.status_code == 200
-        data = r.get_json()
-        assert "logs" in data and isinstance(data["logs"], list)
-        assert any(row.get("user") == "alice" for row in data["logs"])
+    # Point admin_logs at our temp file (it reads the canonical core.log_path)
+    monkeypatch.setattr(app_module, "log_path", str(log_file))
+
+    # Authenticate admin by flagging session
+    with client.session_transaction() as s:
+        s["admin_authenticated"] = True
+        s["admin_login_time"] = datetime.now(timezone.utc).isoformat()
+    r = client.get("/admin/logs")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert "logs" in data and isinstance(data["logs"], list)
+    assert any(row.get("user") == "alice" for row in data["logs"])
 
 
 def test_blocked_denies_correct_pin_and_returns_blocked_until(client, app_module, monkeypatch):
