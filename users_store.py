@@ -1,11 +1,16 @@
 import hmac
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+
+
+class UsersStoreError(RuntimeError):
+    """Raised when the on-disk users store cannot be safely read or written."""
 
 
 def _now_iso() -> str:
