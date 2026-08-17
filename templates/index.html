@@ -1654,6 +1654,11 @@
                         if ((status === 429 || status === 401) && data && data.blocked_until) {
                             startBlockCountdown(data.blocked_until);
                         }
+                        if (data && data.pin_fallback_available) {
+                            currentPin = '';
+                            updatePinDisplay();
+                            showStatus('SSO is temporarily unavailable. Please enter your PIN.', 'error');
+                        }
                         const submitBtn = document.getElementById('submitBtn');
                         submitBtn.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
                         submitBtn.textContent = '✗';

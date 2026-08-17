@@ -72,6 +72,14 @@ user_group = dooropener-users
 # If true, even OIDC users must enter a PIN; if false, OIDC users can open without PIN
 require_pin_for_oidc = false
 
+# Optional: verify the current OIDC token and group membership with the
+# provider's UserInfo endpoint before every pinless door open. Disabled by
+# default for upstream compatibility. No Authentik API credential is required.
+live_permission_check = false
+
+# Timeout for the OIDC UserInfo request. Technical failures return a PIN fallback.
+live_permission_timeout_seconds = 5
+
 # Optional: PEM-encoded public key to validate ID token signatures locally
 # Not required if your environment relies on dynamic JWKS validation via your proxy/outpost
 public_key = 

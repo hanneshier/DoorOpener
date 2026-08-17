@@ -212,9 +212,21 @@ user_group = dooropener-users
 
 # If true, OIDC users must still enter a PIN (no pinless open)
 require_pin_for_oidc = false
+
+# Optional: check OIDC UserInfo live before every pinless open
+live_permission_check = false
+live_permission_timeout_seconds = 5
 ```
 
 When OIDC is enabled, a **Login with SSO** button appears on the keypad. Authenticated users in `user_group` can open the door without a PIN (unless `require_pin_for_oidc = true`). The OIDC flow uses PKCE (`S256`) and validates state and nonce parameters.
+
+### Live permission check (OIDC UserInfo)
+
+Set `live_permission_check = true` to query the OIDC provider's UserInfo endpoint immediately before every pinless door-open request. DoorOpener verifies that the original access token remains valid, the returned subject matches the login, and the freshly returned `groups` claim contains `user_group` when one is configured.
+
+The UserInfo endpoint is discovered from the configured issuer. The provider must return a current `groups` claim for the `profile` scope. No separate Authentik API token or service account is required. The access token from the user login is kept only in DoorOpener's process memory, never in the browser cookie.
+
+If the provider cannot be reached or returns a 5xx response, DoorOpener does not open the door through SSO and the keypad asks for a local PIN instead. Invalid or revoked tokens and removed group membership always deny SSO access.
 
 > If running behind a reverse proxy over HTTP for local dev, set `SESSION_COOKIE_SECURE=false` so the browser sends the session cookie.
 

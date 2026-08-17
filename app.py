@@ -13,6 +13,7 @@ import os
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import traceback
 from collections import defaultdict
@@ -188,6 +189,126 @@ oidc_redirect_uri = config.get("oidc", "redirect_uri", fallback=None)
 oidc_admin_group = config.get("oidc", "admin_group", fallback="")
 oidc_user_group = config.get("oidc", "user_group", fallback="")
 require_pin_for_oidc = config.getboolean("oidc", "require_pin_for_oidc", fallback=False)
+live_permission_check = config.getboolean("oidc", "live_permission_check", fallback=False)
+live_permission_timeout_seconds = config.getfloat("oidc", "live_permission_timeout_seconds", fallback=5.0)
+
+if live_permission_check:
+    if live_permission_timeout_seconds <= 0:
+        raise RuntimeError("[oidc] live_permission_timeout_seconds must be greater than zero.")
+
+# Flask's built-in cookie session is signed but not encrypted. Keep OAuth access
+# tokens in process memory and place only an opaque reference in the cookie.
+# The production container intentionally uses one Gunicorn worker, matching the
+# app's existing in-memory rate-limit state.
+_oidc_access_tokens = {}
+_oidc_access_tokens_lock = threading.Lock()
+
+
+def _store_oidc_access_token(access_token, subject, expires_at):
+    """Store an OIDC access token server-side and return an opaque reference."""
+    token_ref = secrets.token_urlsafe(32)
+    with _oidc_access_tokens_lock:
+        now = time.time()
+        stale_refs = [
+            ref
+            for ref, data in _oidc_access_tokens.items()
+            if isinstance(data.get("expires_at"), (int, float)) and data["expires_at"] < now
+        ]
+        for stale_ref in stale_refs:
+            _oidc_access_tokens.pop(stale_ref, None)
+        _oidc_access_tokens[token_ref] = {
+            "access_token": access_token,
+            "subject": subject,
+            "expires_at": expires_at,
+        }
+    return token_ref
+
+
+def _get_oidc_access_token(token_ref):
+    if not token_ref:
+        return None
+    with _oidc_access_tokens_lock:
+        token_data = _oidc_access_tokens.get(token_ref)
+        if token_data and isinstance(token_data.get("expires_at"), (int, float)) and token_data["expires_at"] < time.time():
+            _oidc_access_tokens.pop(token_ref, None)
+            return None
+        return token_data
+
+
+def _discard_oidc_access_token(token_ref):
+    if token_ref:
+        with _oidc_access_tokens_lock:
+            _oidc_access_tokens.pop(token_ref, None)
+
+
+def _clear_oidc_session():
+    """Remove OIDC state while retaining unrelated rate-limit session data."""
+    _discard_oidc_access_token(session.get("oidc_access_token_ref"))
+    for key in (
+        "oidc_authenticated",
+        "oidc_user",
+        "oidc_groups",
+        "oidc_exp",
+        "oidc_sub",
+        "oidc_access_token_ref",
+    ):
+        session.pop(key, None)
+
+
+def _live_oidc_permission_check():
+    """Return (outcome, message) for the configured OIDC UserInfo check.
+
+    The registered OIDC client discovers the UserInfo endpoint from the issuer's
+    metadata. The access token itself remains in process memory; the browser
+    session contains only an opaque reference to it.
+    """
+    token_data = _get_oidc_access_token(session.get("oidc_access_token_ref"))
+    expected_subject = session.get("oidc_sub")
+    if not token_data or not expected_subject or token_data.get("subject") != expected_subject:
+        return "invalid_token", "OIDC session is no longer available. Please log in again."
+
+    try:
+        provider = oauth.authentik
+        metadata = provider.load_server_metadata()
+        userinfo_endpoint = metadata.get("userinfo_endpoint")
+        if not userinfo_endpoint:
+            return "invalid_response", "SSO permission check could not be completed."
+        userinfo_response = provider.get(
+            userinfo_endpoint,
+            token={"access_token": token_data["access_token"], "token_type": "Bearer"},
+            timeout=live_permission_timeout_seconds,
+        )
+    except (requests.RequestException, OSError):
+        return "technical_error", "SSO permission check is temporarily unavailable. Please enter a PIN."
+    except Exception:
+        logger.exception("OIDC UserInfo permission check failed")
+        return "technical_error", "SSO permission check is temporarily unavailable. Please enter a PIN."
+
+    if userinfo_response.status_code >= 500:
+        return "technical_error", "SSO permission check is temporarily unavailable. Please enter a PIN."
+    if userinfo_response.status_code in (401, 403):
+        return "invalid_token", "Your SSO session is no longer valid. Please log in again."
+    if userinfo_response.status_code != 200:
+        return "invalid_response", "SSO permission check could not be completed."
+
+    try:
+        userinfo = userinfo_response.json()
+    except ValueError:
+        return "invalid_response", "SSO permission check could not be completed."
+
+    if not isinstance(userinfo, dict):
+        return "invalid_response", "SSO permission check could not be completed."
+    if userinfo.get("sub") != expected_subject:
+        return "invalid_token", "Your SSO session is no longer valid. Please log in again."
+
+    if oidc_user_group:
+        groups = userinfo.get("groups")
+        if not isinstance(groups, list):
+            return "invalid_response", "SSO permission check could not be completed."
+        if oidc_user_group not in groups:
+            return "permission_denied", "Your SSO account is no longer authorized to open the door."
+
+    return "allowed", None
 
 oauth = None
 if oidc_enabled and OAuth is not None and all([oidc_issuer, oidc_client_id, oidc_client_secret, oidc_redirect_uri]):
@@ -749,17 +870,16 @@ def open_door():
         oidc_session_expired = False
         if oidc_auth and (not oidc_exp or oidc_exp < time.time()):
             # OIDC session has expired, clear all relevant session data
-            session.pop("oidc_authenticated", None)
-            session.pop("oidc_user", None)
-            session.pop("oidc_groups", None)
-            session.pop("oidc_exp", None)
+            _clear_oidc_session()
             oidc_auth = False  # Reset flag for the rest of the function
             oidc_session_expired = True
             logger.warning(f"OIDC session for IP {primary_ip} has expired. Re-authentication required.")
 
         oidc_groups = session.get("oidc_groups", [])
         oidc_user = session.get("oidc_user")
-        oidc_user_allowed = (not oidc_user_group) or (oidc_user_group in oidc_groups)
+        # In live mode the current group membership is checked immediately
+        # before the open command. The cached claims stay relevant otherwise.
+        oidc_user_allowed = live_permission_check or (not oidc_user_group) or (oidc_user_group in oidc_groups)
 
         data = request.get_json(force=True, silent=True)
         pin_from_request = data.get("pin") if data else None
@@ -770,6 +890,37 @@ def open_door():
 
         # If no PIN provided but OIDC user is authenticated and allowed, proceed without PIN
         if (not pin_from_request) and oidc_auth and oidc_user_allowed and not require_pin_for_oidc:
+            if live_permission_check:
+                live_outcome, live_message = _live_oidc_permission_check()
+                if live_outcome != "allowed":
+                    if live_outcome in ("invalid_token", "permission_denied"):
+                        _clear_oidc_session()
+                        log_attempt(
+                            "LIVE_PERMISSION_DENIED",
+                            live_message,
+                            user=oidc_user or "UNKNOWN",
+                            primary_ip=primary_ip,
+                            session_id=session_id,
+                            now=now,
+                        )
+                        status_code = 401 if live_outcome == "invalid_token" else 403
+                        return jsonify({"status": "error", "message": live_message}), status_code
+
+                    response = {"status": "error", "message": live_message}
+                    log_status = "LIVE_PERMISSION_INVALID"
+                    if live_outcome == "technical_error":
+                        response["pin_fallback_available"] = True
+                        log_status = "LIVE_PERMISSION_UNAVAILABLE"
+                    log_attempt(
+                        log_status,
+                        live_message,
+                        user=oidc_user or "UNKNOWN",
+                        primary_ip=primary_ip,
+                        session_id=session_id,
+                        now=now,
+                    )
+                    return jsonify(response), 503
+
             # Re-check block state right before granting access
             blocked = _enforce_active_block(session_id, identifier, now, primary_ip, oidc_user or "UNKNOWN")
             if blocked is not None:
@@ -1001,7 +1152,17 @@ def oidc_callback():
                 abort(401, "Token not yet valid")
 
         # Reset the session to prevent session fixation attacks
+        _discard_oidc_access_token(session.get("oidc_access_token_ref"))
         session.clear()
+
+        # Live permission checks identify the user through the stable subject
+        # returned by OIDC UserInfo. Do not place secret token material in
+        # Flask's client-side session cookie.
+        oidc_subject = claims.get("sub")
+        access_token = token.get("access_token")
+        if live_permission_check and (not isinstance(oidc_subject, str) or not access_token):
+            logger.error("OIDC live permission check requires sub and access_token claims")
+            abort(401, "OIDC response missing live permission credentials")
 
         # Extract user information from the claims
         user = claims.get("email") or claims.get("preferred_username") or claims.get("name") or "oidc-user"
@@ -1034,6 +1195,11 @@ def oidc_callback():
         session["oidc_user"] = user
         session["oidc_groups"] = groups
         session["oidc_exp"] = claims.get("exp")  # Store token expiration time
+        if live_permission_check:
+            session["oidc_sub"] = oidc_subject
+            session["oidc_access_token_ref"] = _store_oidc_access_token(
+                access_token, oidc_subject, claims.get("exp")
+            )
 
         # If the user is an admin, set the admin flags in the session.
         if is_admin:
@@ -1862,6 +2028,7 @@ def oidc_logout():
     if oauth:
         try:
             # Clear the local session
+            _discard_oidc_access_token(session.get("oidc_access_token_ref"))
             session.clear()
 
             # Fetch the .well-known configuration
