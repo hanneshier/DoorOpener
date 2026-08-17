@@ -360,12 +360,14 @@ def test_live_oidc_callback_keeps_access_token_out_of_cookie_session(client):
     import app as app_module
 
     subject = "11111111-1111-1111-1111-111111111111"
+    access_token_expiry = int(time.time()) + 300
 
     class _Provider:
         def authorize_access_token(self):
             return {
                 "id_token": "dummy",
                 "access_token": "secret-user-access-token",
+                "expires_at": access_token_expiry,
                 "userinfo": {
                     "aud": "dooropener-client",
                     "iss": "https://auth.example.com/application/o/dooropener",
@@ -395,10 +397,59 @@ def test_live_oidc_callback_keeps_access_token_out_of_cookie_session(client):
     assert response.status_code in (302, 303)
     with client.session_transaction() as session_data:
         assert session_data["oidc_sub"] == subject
+        assert session_data["oidc_exp"] == access_token_expiry
         assert "access_token" not in session_data
         assert "secret-user-access-token" not in repr(dict(session_data))
         token_ref = session_data["oidc_access_token_ref"]
     assert app_module._get_oidc_access_token(token_ref)["access_token"] == "secret-user-access-token"
+    assert app_module._get_oidc_access_token(token_ref)["expires_at"] == access_token_expiry
+
+
+def test_live_oidc_callback_rejects_missing_access_token_expiry(client):
+    import time
+
+    import app as app_module
+
+    class _Provider:
+        def authorize_access_token(self):
+            return {
+                "id_token": "dummy",
+                "access_token": "secret-user-access-token",
+                "userinfo": {
+                    "aud": "dooropener-client",
+                    "iss": "https://auth.example.com/application/o/dooropener",
+                    "exp": int(time.time()) + 3600,
+                    "nonce": "nonce",
+                    "sub": "11111111-1111-1111-1111-111111111111",
+                    "groups": ["dooropener-users"],
+                },
+            }
+
+    class _OAuth:
+        authentik = _Provider()
+
+    app_module.oauth = _OAuth()
+    app_module.live_permission_check = True
+    app_module.oidc_client_id = "dooropener-client"
+    app_module.oidc_issuer = "https://auth.example.com/application/o/dooropener"
+    app_module.oidc_user_group = "dooropener-users"
+
+    with client.session_transaction() as session_data:
+        session_data["oidc_state"] = "state"
+        session_data["oidc_nonce"] = "nonce"
+
+    response = client.get("/oidc/callback?state=state", follow_redirects=False)
+
+    assert response.status_code == 401
+
+
+def test_access_token_expiry_accepts_the_provider_configured_ttl():
+    import time
+
+    import app as app_module
+
+    assert app_module._get_valid_access_token_expiry({"expires_at": time.time() + 300}) is not None
+    assert app_module._get_valid_access_token_expiry({"expires_at": time.time() + 7 * 24 * 60 * 60}) is not None
 
 
 def test_live_permission_check_requires_login_after_token_store_is_cleared(client):

@@ -224,7 +224,7 @@ When OIDC is enabled, a **Login with SSO** button appears on the keypad. Authent
 
 Set `live_permission_check = true` to query the OIDC provider's UserInfo endpoint immediately before every pinless door-open request. DoorOpener verifies that the original access token remains valid, the returned subject matches the login, and the freshly returned `groups` claim contains `user_group` when one is configured.
 
-The UserInfo endpoint is discovered from the configured issuer. The provider must return a current `groups` claim for the `profile` scope. No separate Authentik API token or service account is required. The access token from the user login is kept only in DoorOpener's process memory, never in the browser cookie.
+The UserInfo endpoint is discovered from the configured issuer. The provider must return a current `groups` claim for the `profile` scope. No separate Authentik API token or service account is required. The access token from the user login is kept only in DoorOpener's process memory, never in the browser cookie. Live mode requires Authlib's `expires_at` access-token value; its lifetime also determines how long the PIN-less DoorOpener session remains valid.
 
 If the provider cannot be reached or returns a 5xx response, DoorOpener does not open the door through SSO and the keypad asks for a local PIN instead. Invalid or revoked tokens and removed group membership always deny SSO access.
 

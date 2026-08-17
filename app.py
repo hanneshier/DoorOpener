@@ -9,6 +9,7 @@ enhanced multi-layer security, timezone support, and comprehensive brute force p
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
@@ -202,6 +203,19 @@ if live_permission_check:
 # app's existing in-memory rate-limit state.
 _oidc_access_tokens = {}
 _oidc_access_tokens_lock = threading.Lock()
+
+
+def _get_valid_access_token_expiry(token):
+    """Return a future access-token expiry timestamp, or ``None`` if invalid."""
+    expires_at = token.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return None
+
+    expires_at = float(expires_at)
+    now = time.time()
+    if not math.isfinite(expires_at) or expires_at <= now:
+        return None
+    return expires_at
 
 
 def _store_oidc_access_token(access_token, subject, expires_at):
@@ -1168,6 +1182,12 @@ def oidc_callback():
         if live_permission_check and (not isinstance(oidc_subject, str) or not access_token):
             logger.error("OIDC live permission check requires sub and access_token claims")
             abort(401, "OIDC response missing live permission credentials")
+        access_token_expiry = None
+        if live_permission_check:
+            access_token_expiry = _get_valid_access_token_expiry(token)
+            if access_token_expiry is None:
+                logger.error("OIDC live permission check requires a valid, bounded access token expiry")
+                abort(401, "OIDC response has an invalid access token expiry")
 
         # Extract user information from the claims
         user = claims.get("email") or claims.get("preferred_username") or claims.get("name") or "oidc-user"
@@ -1199,10 +1219,12 @@ def oidc_callback():
         session["oidc_authenticated"] = True
         session["oidc_user"] = user
         session["oidc_groups"] = groups
-        session["oidc_exp"] = claims.get("exp")  # Store token expiration time
+        # In live mode, the UserInfo bearer token governs the session lifetime.
+        # Otherwise retain the existing ID-token-based session expiry.
+        session["oidc_exp"] = access_token_expiry if live_permission_check else claims.get("exp")
         if live_permission_check:
             session["oidc_sub"] = oidc_subject
-            session["oidc_access_token_ref"] = _store_oidc_access_token(access_token, oidc_subject, claims.get("exp"))
+            session["oidc_access_token_ref"] = _store_oidc_access_token(access_token, oidc_subject, access_token_expiry)
 
         # If the user is an admin, set the admin flags in the session.
         if is_admin:
