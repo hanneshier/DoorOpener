@@ -229,7 +229,11 @@ def _get_oidc_access_token(token_ref):
         return None
     with _oidc_access_tokens_lock:
         token_data = _oidc_access_tokens.get(token_ref)
-        if token_data and isinstance(token_data.get("expires_at"), (int, float)) and token_data["expires_at"] < time.time():
+        if (
+            token_data
+            and isinstance(token_data.get("expires_at"), (int, float))
+            and token_data["expires_at"] < time.time()
+        ):
             _oidc_access_tokens.pop(token_ref, None)
             return None
         return token_data
@@ -309,6 +313,7 @@ def _live_oidc_permission_check():
             return "permission_denied", "Your SSO account is no longer authorized to open the door."
 
     return "allowed", None
+
 
 oauth = None
 if oidc_enabled and OAuth is not None and all([oidc_issuer, oidc_client_id, oidc_client_secret, oidc_redirect_uri]):
@@ -1197,9 +1202,7 @@ def oidc_callback():
         session["oidc_exp"] = claims.get("exp")  # Store token expiration time
         if live_permission_check:
             session["oidc_sub"] = oidc_subject
-            session["oidc_access_token_ref"] = _store_oidc_access_token(
-                access_token, oidc_subject, claims.get("exp")
-            )
+            session["oidc_access_token_ref"] = _store_oidc_access_token(access_token, oidc_subject, claims.get("exp"))
 
         # If the user is an admin, set the admin flags in the session.
         if is_admin:

@@ -281,6 +281,7 @@ def test_live_permission_check_rejects_removed_group(client, monkeypatch):
 
 def test_live_permission_check_offers_pin_fallback_on_technical_failure(client, monkeypatch):
     import requests
+
     import app as app_module
 
     _configure_live_oidc_session(client, app_module, userinfo_response=requests.Timeout())
@@ -355,6 +356,7 @@ def test_local_pin_remains_independent_of_live_oidc_check(client, monkeypatch):
 
 def test_live_oidc_callback_keeps_access_token_out_of_cookie_session(client):
     import time
+
     import app as app_module
 
     subject = "11111111-1111-1111-1111-111111111111"
