@@ -80,6 +80,10 @@ live_permission_check = false
 # Timeout for the OIDC UserInfo request. Technical failures return a PIN fallback.
 live_permission_timeout_seconds = 5
 
+# Maximum number of active live OIDC sessions held in the in-memory token store.
+# This store supports one Gunicorn worker and one DoorOpener instance only.
+live_permission_max_sessions = 100
+
 # Optional: PEM-encoded public key to validate ID token signatures locally
 # Not required if your environment relies on dynamic JWKS validation via your proxy/outpost
 public_key = 

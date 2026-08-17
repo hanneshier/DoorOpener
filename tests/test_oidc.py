@@ -462,3 +462,33 @@ def test_live_permission_check_requires_login_after_token_store_is_cleared(clien
     response = client.post("/open-door", json={})
 
     assert response.status_code == 401
+
+
+def test_live_oidc_token_store_is_bounded_and_uses_lru_eviction(monkeypatch):
+    import time
+
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "live_permission_max_sessions", 2)
+    expires_at = time.time() + 3600
+    first_ref = app_module._store_oidc_access_token("first", "first-sub", expires_at)
+    second_ref = app_module._store_oidc_access_token("second", "second-sub", expires_at)
+
+    assert app_module._get_oidc_access_token(first_ref)["access_token"] == "first"
+    third_ref = app_module._store_oidc_access_token("third", "third-sub", expires_at)
+
+    assert app_module._get_oidc_access_token(first_ref)["access_token"] == "first"
+    assert app_module._get_oidc_access_token(second_ref) is None
+    assert app_module._get_oidc_access_token(third_ref)["access_token"] == "third"
+
+
+def test_live_oidc_token_store_prunes_expired_entries():
+    import time
+
+    import app as app_module
+
+    expired_ref = app_module._store_oidc_access_token("expired", "expired-sub", time.time() - 1)
+    valid_ref = app_module._store_oidc_access_token("valid", "valid-sub", time.time() + 3600)
+
+    assert app_module._get_oidc_access_token(expired_ref) is None
+    assert app_module._get_oidc_access_token(valid_ref)["access_token"] == "valid"

@@ -86,6 +86,7 @@ def reset_app_globals(monkeypatch):
     monkeypatch.setattr(app_module, "oidc_user_group", "")
     monkeypatch.setattr(app_module, "live_permission_check", False)
     monkeypatch.setattr(app_module, "live_permission_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_module, "live_permission_max_sessions", 100)
     with app_module._oidc_access_tokens_lock:
         app_module._oidc_access_tokens.clear()
 

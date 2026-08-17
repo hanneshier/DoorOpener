@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import traceback
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from configparser import ConfigParser
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -192,16 +192,19 @@ oidc_user_group = config.get("oidc", "user_group", fallback="")
 require_pin_for_oidc = config.getboolean("oidc", "require_pin_for_oidc", fallback=False)
 live_permission_check = config.getboolean("oidc", "live_permission_check", fallback=False)
 live_permission_timeout_seconds = config.getfloat("oidc", "live_permission_timeout_seconds", fallback=5.0)
+live_permission_max_sessions = config.getint("oidc", "live_permission_max_sessions", fallback=100)
 
 if live_permission_check:
     if live_permission_timeout_seconds <= 0:
         raise RuntimeError("[oidc] live_permission_timeout_seconds must be greater than zero.")
+    if live_permission_max_sessions <= 0:
+        raise RuntimeError("[oidc] live_permission_max_sessions must be greater than zero.")
 
 # Flask's built-in cookie session is signed but not encrypted. Keep OAuth access
 # tokens in process memory and place only an opaque reference in the cookie.
-# The production container intentionally uses one Gunicorn worker, matching the
-# app's existing in-memory rate-limit state.
-_oidc_access_tokens = {}
+# This intentionally supports one Gunicorn worker and one DoorOpener instance.
+# Use a shared server-side store before running multiple workers or replicas.
+_oidc_access_tokens = OrderedDict()
 _oidc_access_tokens_lock = threading.Lock()
 
 
@@ -218,18 +221,25 @@ def _get_valid_access_token_expiry(token):
     return expires_at
 
 
+def _prune_oidc_access_tokens(now=None):
+    """Remove expired access tokens. Caller must hold the token-store lock."""
+    now = time.time() if now is None else now
+    stale_refs = [
+        ref
+        for ref, data in _oidc_access_tokens.items()
+        if not isinstance(data.get("expires_at"), (int, float)) or data["expires_at"] <= now
+    ]
+    for stale_ref in stale_refs:
+        _oidc_access_tokens.pop(stale_ref, None)
+
+
 def _store_oidc_access_token(access_token, subject, expires_at):
     """Store an OIDC access token server-side and return an opaque reference."""
     token_ref = secrets.token_urlsafe(32)
     with _oidc_access_tokens_lock:
-        now = time.time()
-        stale_refs = [
-            ref
-            for ref, data in _oidc_access_tokens.items()
-            if isinstance(data.get("expires_at"), (int, float)) and data["expires_at"] < now
-        ]
-        for stale_ref in stale_refs:
-            _oidc_access_tokens.pop(stale_ref, None)
+        _prune_oidc_access_tokens()
+        while len(_oidc_access_tokens) >= live_permission_max_sessions:
+            _oidc_access_tokens.popitem(last=False)
         _oidc_access_tokens[token_ref] = {
             "access_token": access_token,
             "subject": subject,
@@ -242,20 +252,17 @@ def _get_oidc_access_token(token_ref):
     if not token_ref:
         return None
     with _oidc_access_tokens_lock:
+        _prune_oidc_access_tokens()
         token_data = _oidc_access_tokens.get(token_ref)
-        if (
-            token_data
-            and isinstance(token_data.get("expires_at"), (int, float))
-            and token_data["expires_at"] < time.time()
-        ):
-            _oidc_access_tokens.pop(token_ref, None)
-            return None
+        if token_data:
+            _oidc_access_tokens.move_to_end(token_ref)
         return token_data
 
 
 def _discard_oidc_access_token(token_ref):
     if token_ref:
         with _oidc_access_tokens_lock:
+            _prune_oidc_access_tokens()
             _oidc_access_tokens.pop(token_ref, None)
 
 
