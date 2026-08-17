@@ -300,7 +300,7 @@ def _live_oidc_permission_check():
             return "invalid_response", "SSO permission check could not be completed."
         userinfo_response = provider.get(
             userinfo_endpoint,
-            token={"access_token": token_data["access_token"], "token_type": "Bearer"},
+            token={"access_token": token_data["access_token"], "token_type": "Bearer"},  # nosec B105
             timeout=live_permission_timeout_seconds,
         )
     except (requests.RequestException, OSError):
